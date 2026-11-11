@@ -194,6 +194,33 @@ export interface PaymentTransition {
   payment: Payment;
   /** Provider transaction id to claim atomically, when settling. */
   transactionId?: string;
+  /**
+   * When set, the store also quarantines the payment's `uniqueAmount` for the
+   * scope until this epoch millisecond, inside the same atomic operation as the
+   * status write. Without it a crash between the status write and a separate
+   * quarantine write would release the amount while a transaction for the old
+   * payment is still inside the matching window.
+   */
+  quarantineUntil?: number;
+}
+
+/**
+ * One entry in the durable amount quarantine: the unique amount of a payment
+ * that just left the active set, and the moment it may be reallocated.
+ *
+ * The window is `2 * clockSkewMs` (see `PaymentService`): after that, no
+ * provider transaction belonging to the old payment can fall inside a new
+ * payment's matching window.
+ */
+export interface AmountQuarantine {
+  /** Provider ownership of the slot. Omitted for explicitly unscoped payments. */
+  scope?: PaymentScope;
+  /** The exact unique amount that is unavailable. */
+  amount: number;
+  /** Epoch milliseconds after which the amount may be reallocated. */
+  quarantinedUntil: number;
+  /** Epoch milliseconds the entry was recorded, for pruning/audit. */
+  createdAt?: number;
 }
 
 /** Contract for persisting active payments. */
@@ -224,4 +251,37 @@ export interface PaymentStore {
    * {@link transition}; this read-only probe lets callers inspect prior claims.
    */
   hasConsumedTransaction?(transactionId: string): Promise<boolean> | boolean;
+  /**
+   * Record or extend a durable amount quarantine. Re-quarantining the same
+   * `(scope, amount)` must keep the later deadline rather than shortening it.
+   *
+   * Once present, a store must refuse to persist a new pending payment whose
+   * amount is still quarantined (see {@link create}) so the guard cannot be
+   * bypassed by a process that read the active set before its peer wrote.
+   */
+  quarantineAmount?(entry: AmountQuarantine): Promise<void> | void;
+  /**
+   * Read-only probe for a single `(scope, amount)` pair. `at` defaults to the
+   * current time so callers can ask about the present without a clock of their
+   * own.
+   */
+  isAmountQuarantined?(
+    scope: PaymentScope | undefined,
+    amount: number,
+    at?: number,
+  ): Promise<boolean> | boolean;
+  /**
+   * Every amount still quarantined in `scope` at `at`. `PaymentService` folds
+   * these into the allocator's taken set, so a durable store should index the
+   * deadline rather than scanning the table.
+   *
+   * When this and {@link quarantineAmount} are both absent, `PaymentService`
+   * falls back to a process-local map that a restart discards.
+   */
+  listQuarantinedAmounts?(
+    scope?: PaymentScope,
+    at?: number,
+  ): Promise<number[]> | number[];
+  /** Delete quarantines that expired at or before `beforeMs`; returns the count. */
+  pruneQuarantine?(beforeMs: number): Promise<number> | number;
 }

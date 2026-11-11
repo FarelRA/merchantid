@@ -138,10 +138,14 @@ tolerance, not a substitute for correct clocks.
   on the same final amount.
 - When a payment leaves the active set, its amount is quarantined for
   `2 * clockSkewMs` so an old transaction still inside its matching window
-  cannot settle a newly created order with the reused amount.
+  cannot settle a newly created order with the reused amount. `PaymentService`
+  keeps this quarantine in the store when the store implements
+  `quarantineAmount()` + `listQuarantinedAmounts()` (the SQLite adapter does, so
+  it survives a restart) and only falls back to a process-local map otherwise.
 - `InMemoryPaymentStore` and `SqlitePaymentStore` both reject a duplicate active
   amount with `AMOUNT_CONFLICT`. The SQLite adapter enforces it with a partial
-  unique index, including across processes.
+  unique index, including across processes, and additionally rejects a pending
+  payment whose amount is still quarantined.
 - Exhausting the window throws `AMOUNT_POOL_EXHAUSTED`. Do not silently increase
   the offset window beyond what your buyers will tolerate; instead expire or
   reconcile stale orders.
@@ -166,17 +170,30 @@ process.on("SIGTERM", () => {
 });
 ```
 
+Existing databases created by an earlier version of the adapter upgrade in place
+when opened: the adapter only adds the `quarantined_amounts` table and its
+index, and bumps `PRAGMA user_version` to 2. No row is rewritten.
+
 What it guarantees:
 
 - One pending payment per `(scope, final amount)` via a partial unique index.
 - `transition()` is an atomic compare-and-set. It checks the expected status,
-  writes the terminal status, and claims the provider transaction id inside one
-  `BEGIN IMMEDIATE` transaction.
+  writes the terminal status, claims the provider transaction id, and records
+  the freed-amount quarantine inside one `BEGIN IMMEDIATE` transaction.
 - A provider transaction id can settle at most one payment, even after a process
   restart.
+- A freed unique amount stays unavailable for `2 * clockSkewMs` across restarts:
+  the deadline lives in the `quarantined_amounts` table, keyed by
+  `(scope, amount)`, and `create()` refuses a pending payment whose amount is
+  still quarantined even if the caller read the active set before the amount was
+  freed. Re-quarantining never shortens an existing deadline.
 - `hasConsumedTransaction()` exposes the durable replay guard.
 - `pruneConsumedTransactions(beforeMs)` removes claims older than the rolling
   feed lookback. Run it after the lookback, never before.
+- `quarantineAmount()`, `isAmountQuarantined()`, `listQuarantinedAmounts()`, and
+  `pruneQuarantine(beforeMs)` expose the quarantine directly.
+  `PaymentService` prunes lazily on each `createPayment()`, so scheduled pruning
+  is optional; it only keeps the table smaller.
 
 Idempotency rules for the gateway:
 
@@ -187,6 +204,11 @@ Idempotency rules for the gateway:
   reconciliation process (see section 7).
 - If you implement a custom `PaymentStore`, implement `transition()` and the
   same unique constraint. Without it, only a single process is safe.
+- For restart-safe quarantine, also implement `quarantineAmount()`,
+  `listQuarantinedAmounts()` and `pruneQuarantine()`, and honour
+  `PaymentTransition.quarantineUntil` inside `transition()`. A store without
+  them still works, but the freed-amount window is then process-local and a
+  restart can hand the amount out again.
 
 ## 5. Session storage and the vault
 
@@ -367,7 +389,10 @@ endpoint from dashboard network traffic without confirming its semantics.
   `merchantid/sqlite`.
 - **Single process vs multi-process:** the in-memory store is single-process
   only. For multiple replicas, use `SqlitePaymentStore` on shared storage or a
-  custom store with an equivalent atomic transition and unique index.
+  custom store with an equivalent atomic transition, unique index, and durable
+  quarantine. A store without the optional quarantine methods still reconciles,
+  but a process restart forgets which amounts are still inside their
+  `2 * clockSkewMs` window.
 - **SQLite:** enable WAL (default for files), run regular backups, and place the
   database on a local filesystem, not a network share. Stop the poller before
   closing the store. Keep `busyTimeoutMs` below your request timeout.
@@ -432,6 +457,14 @@ These are intentional and covered by tests:
 - `PaymentStore` gained optional atomic `transition()` and
   `hasConsumedTransaction()` capabilities. Custom stores without them remain
   single-process safe only.
+- `PaymentStore` also gained optional `quarantineAmount()`,
+  `isAmountQuarantined()`, `listQuarantinedAmounts()`, and `pruneQuarantine()`
+  capabilities, plus `PaymentTransition.quarantineUntil` so a durable store can
+  record the freed-amount window atomically with the status change.
+- The `2 * clockSkewMs` quarantine is durable with `SqlitePaymentStore`:
+  `PaymentService` falls back to a process-local map only for stores that lack
+  the quarantine methods, and `create()` re-checks the table inside its write
+  transaction so a restart or a peer process cannot reuse a quarantined amount.
 - `InMemoryPaymentStore` now enforces active-amount uniqueness and rejects
   updates for unknown payments.
 

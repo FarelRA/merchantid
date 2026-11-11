@@ -172,6 +172,7 @@ Core tidak boleh mengetahui `next_position`, cookie Shopee, GoID grant, atau pay
 - Mengimplementasikan `transition()` opsional agar cek status, penulisan status, dan klaim ID transaksi terjadi atomik.
 - Mencegah transisi terminal ditimpa proses lain.
 - Menyimpan klaim transaksi atau jaminan ekuivalen bila proses dapat restart.
+- Menyimpan karantina nominal aktif (`quarantineAmount()`, `listQuarantinedAmounts()`, `pruneQuarantine()`, dan `PaymentTransition.quarantineUntil`) atau menerima bahwa jendela `2 x clockSkewMs` hilang saat restart.
 
 `PaymentService` memfilter scope lagi untuk pertahanan terhadap store lama. Itu bukan pengganti constraint database.
 
@@ -199,7 +200,7 @@ Ketika pembayaran meninggalkan himpunan aktif, nominalnya dikarantina selama `2 
 
 `reconcile` memastikan satu transaksi dipakai paling banyak sekali dalam satu call. `PaymentService` mengingat id transaksi yang sudah dipakai lintas tick sampai rolling lookback 24 jam tidak mungkin mengembalikannya lagi.
 
-Kedua penjagaan hidup di memori proses. Restart dan deployment multi-process memerlukan jaminan persistence pada store.
+`SqlitePaymentStore` menyimpan karantina nominal di tabel `quarantined_amounts` (kunci `scope_key` + `amount`) dan mencatatnya dalam transaksi tulis yang sama dengan perubahan status lewat `PaymentTransition.quarantineUntil`. `create()` menolak payment pending yang nominalnya masih dikarantina, sehingga restart maupun proses lain tidak dapat memakai ulang nominal tersebut. Store kustom yang tidak menyediakan `quarantineAmount()`/`listQuarantinedAmounts()` memakai map proses dan kehilangan jendela karantina saat restart; klaim transaksi tetap durable bila store menyimpan `consumed_transactions` atau ekuivalennya.
 
 ### 5.3 Matcher fail-closed untuk data tidak dikenal
 

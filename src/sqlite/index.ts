@@ -4,6 +4,7 @@ import type {
   StatementSync,
 } from "node:sqlite";
 import type {
+  AmountQuarantine,
   Payment,
   PaymentScope,
   PaymentStore,
@@ -23,13 +24,18 @@ import { MerchantIdError } from "../core/errors.js";
  * - A partial unique index enforces one pending payment per
  *   `(scope, uniqueAmount)`. SQLite checks it atomically inside `INSERT` /
  *   `UPDATE`, so two processes cannot both claim the same final amount.
- * - `transition` runs the compare-and-set, the status write, and the provider
- *   transaction claim in one `BEGIN IMMEDIATE` transaction. A transaction id
- *   can settle at most one payment, even across process restarts.
+ * - `transition` runs the compare-and-set, the status write, the provider
+ *   transaction claim, and (when asked) the amount quarantine in one
+ *   `BEGIN IMMEDIATE` transaction. A transaction id can settle at most one
+ *   payment, and a freed amount cannot be reallocated before its quarantine
+ *   ends, even across process restarts.
+ * - `create` rejects a pending payment whose amount is still quarantined, so a
+ *   process that read the active set before its peer freed an amount still
+ *   cannot reuse it.
  * - WAL mode and a busy timeout let readers proceed while a writer commits.
  *
  * The schema is intentionally small and additive; migrate by adding columns
- * rather than rewriting rows. `PRAGMA user_version` is set to 1.
+ * rather than rewriting rows. `PRAGMA user_version` is set to 2.
  */
 
 export interface SqlitePaymentStoreOptions {
@@ -41,7 +47,7 @@ export interface SqlitePaymentStoreOptions {
   wal?: boolean;
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface SqliteBuiltin {
   DatabaseSync: new (path: string) => DatabaseSyncType;
@@ -165,6 +171,10 @@ export class SqlitePaymentStore implements PaymentStore {
   private readonly activeByScopeStatement: StatementSync;
   private readonly consumedStatement: StatementSync;
   private readonly pruneConsumedStatement: StatementSync;
+  private readonly quarantineUpsertStatement: StatementSync;
+  private readonly quarantineProbeStatement: StatementSync;
+  private readonly quarantineListStatement: StatementSync;
+  private readonly pruneQuarantineStatement: StatementSync;
 
   constructor(options: SqlitePaymentStoreOptions) {
     if (typeof options.path !== "string" || options.path.length === 0) {
@@ -212,6 +222,17 @@ export class SqlitePaymentStore implements PaymentStore {
         payment_id TEXT NOT NULL,
         consumed_at REAL NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS quarantined_amounts (
+        scope_key TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        quarantined_until REAL NOT NULL,
+        created_at REAL NOT NULL,
+        PRIMARY KEY (scope_key, amount)
+      );
+
+      CREATE INDEX IF NOT EXISTS quarantined_amounts_until_idx
+        ON quarantined_amounts(quarantined_until);
     `);
 
     const userVersion = this.db.prepare("PRAGMA user_version").get() as
@@ -250,26 +271,92 @@ export class SqlitePaymentStore implements PaymentStore {
     this.pruneConsumedStatement = this.db.prepare(
       "DELETE FROM consumed_transactions WHERE consumed_at < ?",
     );
+    // The deadline only ever moves forward: a settle and a cancel racing on the
+    // same amount must not shorten the window recorded by the other.
+    this.quarantineUpsertStatement = this.db.prepare(`
+      INSERT INTO quarantined_amounts (
+        scope_key, amount, quarantined_until, created_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(scope_key, amount) DO UPDATE SET
+        quarantined_until = MAX(quarantined_until, excluded.quarantined_until),
+        created_at = MIN(created_at, excluded.created_at)
+    `);
+    this.quarantineProbeStatement = this.db.prepare(
+      "SELECT 1 AS found FROM quarantined_amounts WHERE scope_key = ? AND amount = ? AND quarantined_until > ?",
+    );
+    this.quarantineListStatement = this.db.prepare(
+      "SELECT amount FROM quarantined_amounts WHERE scope_key = ? AND quarantined_until > ? ORDER BY amount",
+    );
+    this.pruneQuarantineStatement = this.db.prepare(
+      "DELETE FROM quarantined_amounts WHERE quarantined_until <= ?",
+    );
   }
 
   create(payment: Payment): void {
+    // Only a pending row occupies an amount slot, so only it has to clear the
+    // quarantine. Terminal rows are written as-is (migrations, imports).
+    if (payment.status !== "pending") {
+      this.insertPayment(payment);
+      return;
+    }
+
+    // The active-set read and the insert are separate round trips, so a peer
+    // process may free (or a restart may recall) a quarantined amount between
+    // them. Re-checking here, inside the same write transaction as the insert,
+    // is what makes the quarantine effective across processes and restarts.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.pruneQuarantineStatement.run(Date.now());
+      if (this.isAmountQuarantined(payment.scope, payment.uniqueAmount)) {
+        throw this.amountConflict(payment, true);
+      }
+      this.insertStatement.run(...paymentValues(payment));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.rollback();
+      if (isUniqueConstraintError(error)) {
+        throw this.amountConflict(payment, false);
+      }
+      throw error;
+    }
+  }
+
+  private insertPayment(payment: Payment): void {
     try {
       this.insertStatement.run(...paymentValues(payment));
     } catch (error) {
       if (isUniqueConstraintError(error)) {
-        throw new MerchantIdError(
-          "AMOUNT_CONFLICT",
-          "Unique amount is already active in this scope",
-          {
-            details: {
-              uniqueAmount: payment.uniqueAmount,
-              provider: payment.scope?.provider,
-              merchantId: payment.scope?.merchantId,
-            },
-          },
-        );
+        throw this.amountConflict(payment, false);
       }
       throw error;
+    }
+  }
+
+  private amountConflict(
+    payment: Payment,
+    quarantined: boolean,
+  ): MerchantIdError {
+    return new MerchantIdError(
+      "AMOUNT_CONFLICT",
+      quarantined
+        ? "Unique amount is quarantined in this scope"
+        : "Unique amount is already active in this scope",
+      {
+        details: {
+          uniqueAmount: payment.uniqueAmount,
+          provider: payment.scope?.provider,
+          merchantId: payment.scope?.merchantId,
+          quarantined,
+        },
+      },
+    );
+  }
+
+  private rollback(): void {
+    try {
+      this.db.exec("ROLLBACK");
+    } catch {
+      // The transaction may already have been rolled back by SQLite.
     }
   }
 
@@ -285,17 +372,7 @@ export class SqlitePaymentStore implements PaymentStore {
       }
     } catch (error) {
       if (isUniqueConstraintError(error)) {
-        throw new MerchantIdError(
-          "AMOUNT_CONFLICT",
-          "Unique amount is already active in this scope",
-          {
-            details: {
-              uniqueAmount: payment.uniqueAmount,
-              provider: payment.scope?.provider,
-              merchantId: payment.scope?.merchantId,
-            },
-          },
-        );
+        throw this.amountConflict(payment, false);
       }
       throw error;
     }
@@ -346,17 +423,23 @@ export class SqlitePaymentStore implements PaymentStore {
           )
           .run(transition.transactionId, transition.id, Date.now());
       }
+      // Released amount and terminal status commit together: a crash can no
+      // longer leave the slot free while the old payment is still settleable.
+      if (transition.quarantineUntil !== undefined) {
+        this.quarantineAmount({
+          scope: transition.payment.scope,
+          amount: transition.payment.uniqueAmount,
+          quarantinedUntil: transition.quarantineUntil,
+          createdAt: Date.now(),
+        });
+      }
 
       this.db.exec("COMMIT");
       const persisted = this.getStatement.get(transition.id) as
         PaymentRow | undefined;
       return persisted ? rowToPayment(persisted) : undefined;
     } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-        // The transaction may already have been rolled back by SQLite.
-      }
+      this.rollback();
       if (isUniqueConstraintError(error)) {
         throw new MerchantIdError(
           "AMOUNT_CONFLICT",
@@ -375,6 +458,57 @@ export class SqlitePaymentStore implements PaymentStore {
   /** Delete transaction claims older than the rolling feed lookback. */
   pruneConsumedTransactions(beforeEpochMs: number): number {
     const result = this.pruneConsumedStatement.run(beforeEpochMs);
+    return Number(result.changes);
+  }
+
+  /**
+   * Record or extend the quarantine of a freed unique amount.
+   *
+   * Safe to call on its own, but `transition()` can record it atomically with
+   * the status write via `quarantineUntil`; prefer that inside the money path.
+   */
+  quarantineAmount(entry: AmountQuarantine): void {
+    if (
+      !Number.isSafeInteger(entry.amount) ||
+      !Number.isFinite(entry.quarantinedUntil)
+    ) {
+      throw new MerchantIdError(
+        "CONFIG_INVALID",
+        "quarantineAmount requires a safe integer amount and a finite deadline",
+      );
+    }
+    this.quarantineUpsertStatement.run(
+      paymentScopeKey(entry.scope),
+      entry.amount,
+      entry.quarantinedUntil,
+      entry.createdAt ?? Date.now(),
+    );
+  }
+
+  isAmountQuarantined(
+    scope: PaymentScope | undefined,
+    amount: number,
+    at: number = Date.now(),
+  ): boolean {
+    return Boolean(
+      this.quarantineProbeStatement.get(paymentScopeKey(scope), amount, at),
+    );
+  }
+
+  listQuarantinedAmounts(
+    scope?: PaymentScope,
+    at: number = Date.now(),
+  ): number[] {
+    const rows = this.quarantineListStatement.all(
+      paymentScopeKey(scope),
+      at,
+    ) as unknown as Array<{ amount: number }>;
+    return rows.map((row) => row.amount);
+  }
+
+  /** Delete quarantines that ended at or before `beforeMs`. */
+  pruneQuarantine(beforeMs: number): number {
+    const result = this.pruneQuarantineStatement.run(beforeMs);
     return Number(result.changes);
   }
 

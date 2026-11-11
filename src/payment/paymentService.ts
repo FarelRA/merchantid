@@ -196,11 +196,15 @@ export class PaymentService extends TinyEmitter {
   private writeQueue: Promise<void> = Promise.resolve();
   /**
    * Unique amounts that recently left the active set, mapped to the moment
-   * they were freed. While quarantined (see {@link amountQuarantineMs}) an
-   * amount counts as taken: its old transaction is still inside the window a
+   * their quarantine ends. While quarantined (see {@link amountQuarantineMs})
+   * an amount counts as taken: its old transaction is still inside the window a
    * brand-new payment would accept, and the smallest-free-slot policy would
-   * otherwise hand the amount straight to the next same-priced order,
-   * letting one transfer settle two orders.
+   * otherwise hand the amount straight to the next same-priced order, letting
+   * one transfer settle two orders.
+   *
+   * This map is only the fallback for stores that do not implement the durable
+   * quarantine (`quarantineAmount` + `listQuarantinedAmounts`); a restart
+   * discards it, so production deployments should provide a durable store.
    */
   private readonly recentlyFreedAmounts = new Map<number, number>();
   /**
@@ -373,6 +377,67 @@ export class PaymentService extends TinyEmitter {
     return 2 * this.clockSkewMs;
   }
 
+  /** Scope used for the durable quarantine; mirrors `Payment.scope`. */
+  private get quarantineScope(): PaymentScope | undefined {
+    return this.usesExplicitScope ? this.scope : undefined;
+  }
+
+  /**
+   * Amounts that must be treated as taken at `at`: those still inside their
+   * quarantine window. A durable store answers from its own table, so the
+   * answer survives a restart; otherwise this process's map is the only record.
+   */
+  private async listQuarantinedAmounts(at: number): Promise<number[]> {
+    const store = this.store;
+    if (
+      typeof store.quarantineAmount === "function" &&
+      typeof store.listQuarantinedAmounts === "function"
+    ) {
+      // Deleting rows whose window already ended is always safe and keeps the
+      // table bounded; stores without the capability simply keep stale rows.
+      await store.pruneQuarantine?.(at);
+      return await store.listQuarantinedAmounts(this.quarantineScope, at);
+    }
+    const amounts: number[] = [];
+    for (const [amount, until] of this.recentlyFreedAmounts) {
+      if (until <= at) {
+        this.recentlyFreedAmounts.delete(amount);
+        continue;
+      }
+      amounts.push(amount);
+    }
+    return amounts;
+  }
+
+  /**
+   * Make a just-freed amount unavailable until `quarantinedUntil`.
+   *
+   * The durable store records it, and `transition()` can do so in the same
+   * transaction as the status change via `quarantineUntil`. This call still
+   * follows the transition as an idempotent upsert, so stores whose
+   * `transition()` ignores that field do not silently lose the window.
+   */
+  private async quarantineFreedAmount(
+    amount: number,
+    quarantinedUntil: number | undefined,
+  ): Promise<void> {
+    if (quarantinedUntil === undefined) return;
+    const store = this.store;
+    if (
+      typeof store.quarantineAmount === "function" &&
+      typeof store.listQuarantinedAmounts === "function"
+    ) {
+      await store.quarantineAmount({
+        scope: this.quarantineScope,
+        amount,
+        quarantinedUntil,
+        createdAt: now(),
+      });
+      return;
+    }
+    this.recentlyFreedAmounts.set(amount, quarantinedUntil);
+  }
+
   private async listActivePayments(): Promise<Payment[]> {
     // A no-scope query is the only portable way to discover ambiguous
     // unscoped records because a strict store hides them from scoped reads.
@@ -435,18 +500,14 @@ export class PaymentService extends TinyEmitter {
       this.assertActive("create payments");
 
       const current = now();
-      for (const [amount, freedAt] of this.recentlyFreedAmounts) {
-        if (freedAt + this.amountQuarantineMs <= current) {
-          this.recentlyFreedAmounts.delete(amount);
-        }
-      }
 
       // Compare against the amounts themselves: two different base amounts
       // can otherwise land on the same total. Quarantined amounts count as
-      // taken; see {@link recentlyFreedAmounts}.
+      // taken; a durable store answers from its own table, so a restart cannot
+      // hand a just-freed amount to the next same-priced order.
       const takenAmounts = [
         ...active.map((payment) => payment.uniqueAmount),
-        ...this.recentlyFreedAmounts.keys(),
+        ...(await this.listQuarantinedAmounts(current)),
       ];
 
       const uniqueOffset = this.allocator.allocate(input.amount, takenAmounts);
@@ -538,6 +599,13 @@ export class PaymentService extends TinyEmitter {
       const updated: Payment = transaction
         ? { ...current, status, transaction }
         : { ...current, status };
+      // The freed amount must stay unavailable until a transaction belonging to
+      // this payment can no longer fall inside a new payment's window. Zero
+      // skew means immediate reuse is safe; skip the write entirely then.
+      const quarantineUntil =
+        this.amountQuarantineMs > 0
+          ? now() + this.amountQuarantineMs
+          : undefined;
 
       if (this.store.transition) {
         // Preferred path: the store checks the expected status and claims the
@@ -549,9 +617,10 @@ export class PaymentService extends TinyEmitter {
           expectedStatus: "pending",
           payment: clonePayment(updated),
           transactionId: transaction?.id,
+          quarantineUntil,
         });
         if (!persisted) return undefined;
-        this.recentlyFreedAmounts.set(current.uniqueAmount, now());
+        await this.quarantineFreedAmount(current.uniqueAmount, quarantineUntil);
         if (transaction) {
           this.consumedTransactionIds.set(transaction.id, now());
         }
@@ -563,7 +632,7 @@ export class PaymentService extends TinyEmitter {
       await this.store.update(clonePayment(updated));
       // The freed amount enters quarantine, and a settling transaction is
       // remembered as consumed so it can never settle a second payment.
-      this.recentlyFreedAmounts.set(current.uniqueAmount, now());
+      await this.quarantineFreedAmount(current.uniqueAmount, quarantineUntil);
       if (transaction) {
         this.consumedTransactionIds.set(transaction.id, now());
       }

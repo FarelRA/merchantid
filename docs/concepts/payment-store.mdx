@@ -13,6 +13,18 @@ interface PaymentStore {
   update(payment: Payment): Promise<void> | void;
   get(id: string): Promise<Payment | undefined> | Payment | undefined;
   listActive(scope?: PaymentScope): Promise<Payment[]> | Payment[];
+  // Opsional: transisi atomik dan replay guard.
+  transition?(transition: PaymentTransition): Payment | undefined;
+  hasConsumedTransaction?(transactionId: string): boolean;
+  // Opsional: karantina nominal tahan restart.
+  quarantineAmount?(entry: AmountQuarantine): void;
+  isAmountQuarantined?(
+    scope: PaymentScope | undefined,
+    amount: number,
+    at?: number,
+  ): boolean;
+  listQuarantinedAmounts?(scope?: PaymentScope, at?: number): number[];
+  pruneQuarantine?(beforeMs: number): number;
 }
 ```
 
@@ -28,7 +40,7 @@ import { InMemoryPaymentStore } from "merchantid";
 const store = new InMemoryPaymentStore();
 ```
 
-`InMemoryPaymentStore` hanya cocok untuk test atau satu proses. State, karantina nominal, dan ingatan transaksi yang sudah dipakai tidak dapat mengoordinasikan beberapa proses. Deployment multi-instance harus memindahkan jaminan itu ke penyimpanan tahan lama.
+`InMemoryPaymentStore` hanya cocok untuk test atau satu proses. Ia tidak mengimplementasikan metode karantina opsional, sehingga `PaymentService` memakai map proses: state, jendela karantina nominal, dan ingatan transaksi yang sudah dipakai hilang saat restart dan tidak dapat mengoordinasikan beberapa proses. Deployment multi-instance harus memindahkan jaminan itu ke penyimpanan tahan lama.
 
 ## Store production
 
@@ -66,14 +78,17 @@ Store production wajib:
 - **Mencegah transisi terminal ditimpa proses lain.**
 - **Mengimplementasikan `transition()` opsional** agar cek status, penulisan status, dan klaim ID transaksi terjadi atomik.
 - **Menyimpan klaim transaksi atau jaminan ekuivalen bila proses dapat restart.**
+- **Menyimpan karantina nominal** lewat `quarantineAmount()`, `listQuarantinedAmounts()`, dan `pruneQuarantine()`, serta menghormati `PaymentTransition.quarantineUntil` di dalam `transition()`. Tanpa itu, jendela `2 x clockSkewMs` hanya hidup di memori proses.
 
 Untuk Node >= 22.13, `merchantid/sqlite` menyediakan `SqlitePaymentStore` yang memenuhi seluruh syarat di atas tanpa dependency runtime.
 
 <Warning>
   `PaymentService` memfilter scope lagi sebagai pertahanan terhadap store lama,
-  tetapi itu bukan pengganti constraint database. Karantina nominal dan ingatan
-  transaksi terkonsumsi hidup di memori proses; restart dan multi-process
-  memerlukan jaminan persistence pada store. Lihat [Konsep
+  tetapi itu bukan pengganti constraint database. `SqlitePaymentStore` menyimpan
+  karantina nominal di tabel `quarantined_amounts`, sehingga nominal yang baru
+  dilepas tidak dapat dipakai ulang setelah restart. Store kustom yang tidak
+  mengimplementasikan metode karantina opsional tetap berjalan, tetapi jendela
+  karantina dan ingatan transaksi terkonsumsi hilang saat restart. Lihat [Konsep
   inti](/guide/concepts).
 </Warning>
 

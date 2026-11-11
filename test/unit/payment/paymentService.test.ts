@@ -11,6 +11,7 @@ import {
 import type {
   MerchantTransaction,
   Payment,
+  PaymentScope,
   PaymentStore,
   TransactionLister,
 } from "../../../src/core/types.js";
@@ -246,6 +247,44 @@ describe("PaymentService cross-tick settlement integrity", () => {
 
     const second = await service.createPayment({ amount: 3_500 });
     expect(second.uniqueAmount).toBe(first.uniqueAmount);
+  });
+
+  it("falls back to a process-local quarantine for stores without durable support", async () => {
+    // Only the required PaymentStore surface, deliberately without the optional
+    // quarantine capabilities, so the service must keep using its in-memory
+    // map. `InMemoryPaymentStore` behaves the same way.
+    class PlainStore implements PaymentStore {
+      private readonly inner = new InMemoryPaymentStore();
+      create(payment: Payment): void {
+        this.inner.create(payment);
+      }
+      update(payment: Payment): void {
+        this.inner.update(payment);
+      }
+      get(id: string): Payment | undefined {
+        return this.inner.get(id);
+      }
+      listActive(scope?: PaymentScope): Payment[] {
+        return this.inner.listActive(scope);
+      }
+    }
+    const service = new PaymentService({
+      merchantId: "G1",
+      store: new PlainStore(),
+      transactions: feed([]),
+      allocator: new AmountAllocator(999),
+      clockSkewMs: 5,
+    });
+
+    const first = await service.createPayment({ amount: 3_500 });
+    await service.cancelPayment(first.id);
+
+    const quarantined = await service.createPayment({ amount: 3_500 });
+    expect(quarantined.uniqueAmount).toBe(3_502);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const released = await service.createPayment({ amount: 3_500 });
+    expect(released.uniqueAmount).toBe(3_501);
   });
 });
 

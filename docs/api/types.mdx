@@ -46,6 +46,17 @@ interface PaymentStore {
   update(payment: Payment): Promise<void> | void;
   get(id: string): Promise<Payment | undefined> | Payment | undefined;
   listActive(scope?: PaymentScope): Promise<Payment[]> | Payment[];
+  // Opsional: transisi atomik, replay guard, dan karantina nominal.
+  transition?(transition: PaymentTransition): Payment | undefined;
+  hasConsumedTransaction?(transactionId: string): boolean;
+  quarantineAmount?(entry: AmountQuarantine): void;
+  isAmountQuarantined?(
+    scope: PaymentScope | undefined,
+    amount: number,
+    at?: number,
+  ): boolean;
+  listQuarantinedAmounts?(scope?: PaymentScope, at?: number): number[];
+  pruneQuarantine?(beforeMs: number): number;
 }
 ```
 
