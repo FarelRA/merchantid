@@ -51,7 +51,37 @@
         "default": "./dist/index.cjs"
       }
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./webhook": {
+      "import": {
+        "types": "./dist/webhook.d.ts",
+        "default": "./dist/webhook.js"
+      },
+      "require": {
+        "types": "./dist/webhook.d.cts",
+        "default": "./dist/webhook.cjs"
+      }
+    },
+    "./vault": {
+      "import": {
+        "types": "./dist/vault.d.ts",
+        "default": "./dist/vault.js"
+      },
+      "require": {
+        "types": "./dist/vault.d.cts",
+        "default": "./dist/vault.cjs"
+      }
+    },
+    "./sqlite": {
+      "import": {
+        "types": "./dist/sqlite.d.ts",
+        "default": "./dist/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/sqlite.d.cts",
+        "default": "./dist/sqlite.cjs"
+      }
+    }
   },
   "sideEffects": false,
   "publishConfig": {

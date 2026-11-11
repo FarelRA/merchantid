@@ -27,14 +27,28 @@ describe("npm package metadata contract", () => {
     expect(manifest.dependencies ?? {}).toEqual({});
   });
 
-  it("exposes one package root and one MerchantId CLI binary", () => {
+  it("exposes the runtime-agnostic root plus explicit Node-only subpaths", () => {
     expect(manifest.bin).toEqual({ merchantid: "dist/cli.cjs" });
-    // Only the root entry is importable; "./package.json" is the conventional
-    // escape hatch tooling needs and does not widen the API surface.
+    // The root stays free of Node builtins. Optional SQLite, webhook, and
+    // vault integrations are separate opt-in subpaths; "./package.json" is the
+    // conventional tooling escape hatch.
     expect(Object.keys(manifest.exports ?? {})).toEqual([
       ".",
       "./package.json",
+      "./webhook",
+      "./vault",
+      "./sqlite",
     ]);
+  });
+
+  it("gives every subpath ESM and CJS declarations", () => {
+    for (const subpath of ["./webhook", "./vault", "./sqlite"]) {
+      const entry = (manifest.exports ?? {})[subpath] as
+        Record<string, Record<string, string>> | undefined;
+      const name = subpath.slice(2);
+      expect(entry?.import?.types).toBe(`./dist/${name}.d.ts`);
+      expect(entry?.require?.types).toBe(`./dist/${name}.d.cts`);
+    }
   });
 
   it("gives CJS consumers CJS-flavoured types", () => {

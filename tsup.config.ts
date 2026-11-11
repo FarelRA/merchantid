@@ -19,6 +19,23 @@ export default defineConfig([
     minify: false,
   },
   {
+    // Optional Node-only integrations. Keeping them out of the main entry is
+    // deliberate: `node:sqlite`, `node:dns`, and `node:crypto` would break
+    // Workers/Edge/browser consumers that only use the payment core.
+    entry: {
+      webhook: "src/webhook/index.ts",
+      vault: "src/security/sessionVault.ts",
+      sqlite: "src/sqlite/index.ts",
+    },
+    format: ["esm", "cjs"],
+    dts: true,
+    clean: false,
+    sourcemap: false,
+    target: "node18",
+    splitting: false,
+    minify: false,
+  },
+  {
     // The CLI is only ever executed through the `bin` entry, which resolves to
     // the CJS build. An ESM twin was shipped but unreachable - nothing in
     // `exports` or `bin` pointed at it.
