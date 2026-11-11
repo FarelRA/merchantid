@@ -5,7 +5,6 @@ import {
   GOJEK_API_BASE_URL,
   MAX_TRANSACTION_PAGE_SIZE,
   PAID_TRANSACTION_STATUSES,
-  TRANSACTION_AMOUNT_SCALE,
 } from "../core/constants.js";
 import { toIsoUtc } from "../utils/time.js";
 import type {
@@ -13,6 +12,7 @@ import type {
   TransactionLister,
   TransactionQuery,
 } from "../core/types.js";
+import { normalizeGopayAmount } from "../providers/gopay/amount.js";
 
 interface RawTransaction {
   id: string;
@@ -75,35 +75,44 @@ export class TransactionClient implements TransactionLister {
       query: params,
     });
 
-    return (payload.transactions ?? []).map(normalizeTransaction);
+    return (payload.transactions ?? []).flatMap((transaction) => {
+      const normalized = normalizeTransaction(transaction);
+      return normalized ? [normalized] : [];
+    });
   }
 }
 
 /**
- * Convert a feed amount from minor units to whole rupiah.
+ * Convert one raw merchant-analytics row into the provider-neutral shape.
  *
- * The feed sends `300100` for Rp 3.001. Division is exact rather than rounded:
- * a value that is not a whole rupiah stays fractional and therefore simply
- * fails to match a whole-rupiah payment intent, which is the safe outcome.
+ * Returns `undefined` instead of fabricating a value when the row cannot be
+ * used safely: a missing id cannot be consumed exactly once, a malformed or
+ * sub-rupiah amount cannot be compared to a whole-rupiah payment intent, and
+ * a non-IDR row would be divided on the wrong currency scale.
  */
-function toWholeRupiah(minorUnits: number | undefined): number | undefined {
-  if (typeof minorUnits !== "number" || Number.isNaN(minorUnits)) {
-    return undefined;
-  }
-  return minorUnits / TRANSACTION_AMOUNT_SCALE;
-}
+function normalizeTransaction(
+  raw: RawTransaction,
+): MerchantTransaction | undefined {
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  if (id.length === 0) return undefined;
 
-function normalizeTransaction(raw: RawTransaction): MerchantTransaction {
+  const grossAmount = normalizeGopayAmount(raw.gross_amount);
+  if (grossAmount === undefined) return undefined;
+
+  const currency = (raw.currency ?? "IDR").toString().toUpperCase();
+  if (currency !== "IDR") return undefined;
+
   return {
-    id: raw.id,
+    id,
     orderId: raw.order_id,
     merchantId: raw.merchant_id,
     status: raw.transaction_status,
     paymentType: raw.payment_type,
     // The feed reports minor units; the rest of the library uses whole rupiah.
-    grossAmount: toWholeRupiah(raw.gross_amount) ?? 0,
-    realGrossAmount: toWholeRupiah(raw.real_gross_amount),
-    currency: raw.currency ?? "IDR",
+    // This is the single normalization boundary for GoPay.
+    grossAmount,
+    realGrossAmount: normalizeGopayAmount(raw.real_gross_amount),
+    currency,
     transactionTime: raw.transaction_time,
     settlementTime: raw.settlement_time,
     transactionSource: raw.transaction_source,

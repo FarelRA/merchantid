@@ -98,7 +98,16 @@ export interface MerchantTransaction {
   merchantId: string;
   status: string;
   paymentType: string;
+  /**
+   * The captured amount in **whole rupiah**, normalized exactly once by the
+   * provider adapter. This is the only amount field used for matching.
+   */
   grossAmount: number;
+  /**
+   * Optional provider-reported "real" gross amount, also in whole rupiah.
+   * Informational only: it is deliberately not used to settle a payment,
+   * because accepting a second amount field makes exact matching ambiguous.
+   */
   realGrossAmount?: number;
   currency: string;
   transactionTime: string;
@@ -167,6 +176,26 @@ export interface Payment {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * A compare-and-set status transition, optionally claiming the provider
+ * transaction that caused it in the same atomic operation.
+ *
+ * `expectedStatus` prevents a stale poller from overwriting a terminal status
+ * (`paid` -> `cancelled`). When `transactionId` is present, a durable store
+ * must claim it exactly once across all processes: a transaction that already
+ * settled one payment may never settle another.
+ */
+export interface PaymentTransition {
+  /** Payment being transitioned. Must match `payment.id`. */
+  id: string;
+  /** Status the stored row must still have for the transition to apply. */
+  expectedStatus: PaymentStatus;
+  /** Complete next state to persist. */
+  payment: Payment;
+  /** Provider transaction id to claim atomically, when settling. */
+  transactionId?: string;
+}
+
 /** Contract for persisting active payments. */
 export interface PaymentStore {
   create(payment: Payment): Promise<void> | void;
@@ -178,4 +207,21 @@ export interface PaymentStore {
    * custom store returns records from other scopes.
    */
   listActive(scope?: PaymentScope): Promise<Payment[]> | Payment[];
+  /**
+   * Optional atomic compare-and-set. `PaymentService` uses it when present so
+   * concurrent pollers and multi-process deployments cannot double-settle a
+   * payment or overwrite a terminal status. Implementations that omit it keep
+   * the previous get-then-update behaviour (single-process safe only).
+   *
+   * Must return the persisted payment on success and `undefined` when the
+   * expected status no longer holds or the transaction was already claimed.
+   */
+  transition?(
+    transition: PaymentTransition,
+  ): Promise<Payment | undefined> | Payment | undefined;
+  /**
+   * Optional durable replay guard. Durable stores should also enforce this in
+   * {@link transition}; this read-only probe lets callers inspect prior claims.
+   */
+  hasConsumedTransaction?(transactionId: string): Promise<boolean> | boolean;
 }

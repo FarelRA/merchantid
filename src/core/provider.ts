@@ -48,6 +48,22 @@ export interface MerchantProvider<TSession = SessionState> {
   exportSession(): TSession;
 }
 
+/**
+ * Stable identity for a payment scope, suitable for a database unique index.
+ *
+ * Encodes an absent `accountId` distinctly from an empty string. Unscoped
+ * payments use an empty key; a store should keep them separate from every
+ * scoped row.
+ */
+export function paymentScopeKey(scope?: PaymentScope): string {
+  if (!scope) return "";
+  return JSON.stringify([
+    scope.provider,
+    scope.accountId ?? null,
+    scope.merchantId,
+  ]);
+}
+
 /** Compare two complete payment scopes. */
 export function samePaymentScope(
   left: PaymentScope,

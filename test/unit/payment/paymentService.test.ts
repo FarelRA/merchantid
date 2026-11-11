@@ -148,20 +148,24 @@ describe("PaymentService cross-tick settlement integrity", () => {
 
   it("never settles a second payment with an already-consumed transaction", async () => {
     // clockSkewMs 0 disables the amount quarantine, so the freed amount is
-    // re-allocated immediately - the hostile setup. The unparseable timestamp
-    // routes matching through the fail-open path, which skips the window
-    // check and would re-match the old transaction on every subsequent tick.
-    const tx = makeTx({
-      id: "tx-consumed",
-      grossAmount: 3_501,
-      transactionTime: "not-a-date",
-    });
+    // re-allocated immediately - the hostile setup. The transaction timestamp
+    // is slightly in the future so it is inside BOTH payment windows; only the
+    // cross-tick consumed-transaction guard prevents the second settlement.
+    const transactions: MerchantTransaction[] = [];
     const { service, store } = makeService({
-      transactions: feed([tx]),
+      transactions: feed(transactions),
       clockSkewMs: 0,
     });
 
     const first = await service.createPayment({ amount: 3_500 });
+    transactions.push(
+      makeTx({
+        id: "tx-consumed",
+        grossAmount: 3_501,
+        transactionTime: new Date(Date.now() + 500).toISOString(),
+      }),
+    );
+
     const tick1 = await service.tick();
     expect(tick1.paid).toHaveLength(1);
     expect((await store.get(first.id))?.status).toBe("paid");
@@ -202,6 +206,35 @@ describe("PaymentService cross-tick settlement integrity", () => {
     expect(second.uniqueAmount).toBe(3_502);
   });
 
+  it("releases an expired amount for reuse once quarantine has elapsed", async () => {
+    const { service } = makeService({
+      transactions: feed([]),
+      defaultExpiryMs: -100,
+      clockSkewMs: 5,
+    });
+    const first = await service.createPayment({ amount: 3_500 });
+    await service.tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const second = await service.createPayment({ amount: 3_500 });
+    expect(second.uniqueAmount).toBe(first.uniqueAmount);
+  });
+
+  it("releases an expired amount immediately when quarantine is disabled", async () => {
+    const { service } = makeService({
+      transactions: feed([]),
+      defaultExpiryMs: -1,
+      clockSkewMs: 0,
+    });
+    const first = await service.createPayment({ amount: 3_500 });
+    await service.tick();
+
+    // With skew 0 the quarantine is zero; this locks the release-on-expiry
+    // path. The default-skew quarantine is covered by the cancel/settle tests.
+    const second = await service.createPayment({ amount: 3_500 });
+    expect(second.uniqueAmount).toBe(first.uniqueAmount);
+  });
+
   it("releases a quarantined amount once the window has passed", async () => {
     // Tiny skew -> 10ms quarantine; the wait is comfortably past it while the
     // "still quarantined" assertions above use margins of minutes.
@@ -214,6 +247,23 @@ describe("PaymentService cross-tick settlement integrity", () => {
     const second = await service.createPayment({ amount: 3_500 });
     expect(second.uniqueAmount).toBe(first.uniqueAmount);
   });
+});
+
+describe("PaymentService configuration validation", () => {
+  it.each([Number.NaN, Infinity, -1])(
+    "rejects an invalid clockSkewMs (%s)",
+    (clockSkewMs) => {
+      expect(
+        () =>
+          new PaymentService({
+            merchantId: "G1",
+            store: new InMemoryPaymentStore(),
+            transactions: feed([]),
+            clockSkewMs,
+          }),
+      ).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    },
+  );
 });
 
 describe("PaymentService.tick", () => {
@@ -361,6 +411,25 @@ describe("PaymentService.tick", () => {
 
     expect(result.expired).toHaveLength(1);
     expect((await store.get(payment.id))?.status).toBe("expired");
+  });
+
+  it("does not double-settle when two services share a store", async () => {
+    const store = new InMemoryPaymentStore();
+    const tx = makeTx({
+      id: "tx-shared",
+      grossAmount: 10_001,
+      transactionTime: new Date(Date.now() + 500).toISOString(),
+    });
+    const first = makeService({ transactions: feed([tx]), store }).service;
+    const second = makeService({ transactions: feed([tx]), store }).service;
+    await first.createPayment({ amount: 10_000, expiresInMs: 60_000 });
+
+    const [a, b] = await Promise.all([first.tick(), second.tick()]);
+
+    expect(a.paid.length + b.paid.length).toBe(1);
+    const active = store.listActive();
+    expect(active).toHaveLength(0);
+    expect(store.hasConsumedTransaction("tx-shared")).toBe(true);
   });
 
   it("skips work while a previous tick is still running", async () => {

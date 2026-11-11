@@ -11,6 +11,24 @@ describe("MerchantId public API contract", () => {
     expect(api.MerchantIdError).toBeTypeOf("function");
     expect(api.PaymentService).toBeTypeOf("function");
     expect(api.samePaymentScope).toBeTypeOf("function");
+    expect(api.paymentScopeKey).toBeTypeOf("function");
+    expect(api.matchesPayment).toBeTypeOf("function");
+    expect(api.reconcile).toBeTypeOf("function");
+    expect(api.isSettleableStatus).toBeTypeOf("function");
+    expect(api.normalizeGopayAmount).toBeTypeOf("function");
+    expect(api.jitteredBackoff).toBeTypeOf("function");
+  });
+
+  it("keeps Node-only integrations out of the runtime-agnostic root", () => {
+    for (const name of [
+      "SqlitePaymentStore",
+      "createSqlitePaymentStore",
+      "SessionVault",
+      "deliverWebhook",
+      "validateWebhookUrl",
+    ]) {
+      expect(name in api).toBe(false);
+    }
   });
 
   it.each([

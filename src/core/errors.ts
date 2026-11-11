@@ -11,6 +11,7 @@ export type MerchantIdErrorCode =
   | "HTTP_ERROR"
   | "API_ERROR"
   | "AMOUNT_POOL_EXHAUSTED"
+  | "AMOUNT_CONFLICT"
   | "QRIS_PARSE_ERROR";
 
 export class MerchantIdError extends Error {

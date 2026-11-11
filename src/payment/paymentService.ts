@@ -243,6 +243,12 @@ export class PaymentService extends TinyEmitter {
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.defaultExpiryMs = options.defaultExpiryMs ?? DEFAULT_PAYMENT_EXPIRY_MS;
     this.clockSkewMs = options.clockSkewMs ?? 60_000;
+    if (!Number.isFinite(this.clockSkewMs) || this.clockSkewMs < 0) {
+      throw new MerchantIdError(
+        "CONFIG_INVALID",
+        "clockSkewMs must be a finite, non-negative number of milliseconds",
+      );
+    }
     // Clamped here as well as in the transaction client: pagination steps
     // `from` by this value, so if the client silently shrank an oversized page
     // the second page would skip the rows between the two sizes.
@@ -532,6 +538,28 @@ export class PaymentService extends TinyEmitter {
       const updated: Payment = transaction
         ? { ...current, status, transaction }
         : { ...current, status };
+
+      if (this.store.transition) {
+        // Preferred path: the store checks the expected status and claims the
+        // transaction id atomically. This is what protects multi-process
+        // deployments and two services sharing one store from both observing
+        // `pending` and both writing `paid`.
+        const persisted = await this.store.transition({
+          id,
+          expectedStatus: "pending",
+          payment: clonePayment(updated),
+          transactionId: transaction?.id,
+        });
+        if (!persisted) return undefined;
+        this.recentlyFreedAmounts.set(current.uniqueAmount, now());
+        if (transaction) {
+          this.consumedTransactionIds.set(transaction.id, now());
+        }
+        return clonePayment(persisted);
+      }
+
+      // Legacy custom store without the optional atomic capability. The local
+      // write queue keeps transitions serialized within this process only.
       await this.store.update(clonePayment(updated));
       // The freed amount enters quarantine, and a settling transaction is
       // remembered as consumed so it can never settle a second payment.

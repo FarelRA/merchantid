@@ -46,4 +46,44 @@ describe("AmountAllocator", () => {
     expect(() => new AmountAllocator(0)).toThrow();
     expect(() => new AmountAllocator(1.5)).toThrow();
   });
+
+  it.each([0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER])(
+    "rejects an invalid base amount (%s)",
+    (baseAmount) => {
+      const allocator = new AmountAllocator(3);
+      expect(() => allocator.allocate(baseAmount, [])).toThrowError(
+        expect.objectContaining({ code: "CONFIG_INVALID" }),
+      );
+    },
+  );
+
+  it("rejects invalid taken amounts instead of silently ignoring them", () => {
+    const allocator = new AmountAllocator(3);
+    expect(() => allocator.allocate(10_000, [Number.NaN])).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }),
+    );
+    expect(() => allocator.allocate(10_000, [10_001.5])).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }),
+    );
+    expect(() => allocator.allocate(10_000, [-1])).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }),
+    );
+  });
+
+  it("accepts any iterable of taken amounts", () => {
+    const allocator = new AmountAllocator(5);
+    expect(allocator.allocate(10_000, new Set([10_001, 10_002]))).toBe(3);
+    expect(
+      allocator.allocate(10_000, [10_001, 10_002, 10_003][Symbol.iterator]()),
+    ).toBe(4);
+  });
+
+  it("does not hand out a slot whose amount collides with another base", () => {
+    const allocator = new AmountAllocator(3);
+    // 3499 + 2 = 3501, which is already active for base 3500.
+    expect(allocator.allocate(3499, [3500, 3501])).toBe(3);
+    expect(() => allocator.allocate(3499, [3500, 3501, 3502])).toThrowError(
+      expect.objectContaining({ code: "AMOUNT_POOL_EXHAUSTED" }),
+    );
+  });
 });

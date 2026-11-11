@@ -13,7 +13,7 @@ export type {
 } from "./merchantid.js";
 export * from "./providers/gopay/index.js";
 export * from "./providers/shopee/index.js";
-export { samePaymentScope } from "./core/provider.js";
+export { samePaymentScope, paymentScopeKey } from "./core/provider.js";
 export type {
   MerchantProvider,
   TransactionFeed,
@@ -31,8 +31,18 @@ export type {
   PaymentServiceEvents,
 } from "./payment/paymentService.js";
 export { InMemoryPaymentStore } from "./payment/paymentStore.js";
+export { jitteredBackoff } from "./utils/polling.js";
+export type { BackoffOptions } from "./utils/polling.js";
 export { AmountAllocator } from "./payment/amountAllocator.js";
-export { matchesPayment, reconcile } from "./payment/paymentMatcher.js";
+export {
+  matchesPayment,
+  reconcile,
+  isSettleableStatus,
+  isRejectedStatus,
+  transactionTimeMs,
+  SETTLEABLE_TRANSACTION_STATUSES,
+  REJECTED_TRANSACTION_STATUSES,
+} from "./payment/paymentMatcher.js";
 
 export {
   parseEmv,

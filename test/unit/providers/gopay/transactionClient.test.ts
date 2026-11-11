@@ -84,15 +84,42 @@ describe("TransactionClient amount normalization", () => {
     expect((tx?.raw as { gross_amount: number }).gross_amount).toBe(300100);
   });
 
-  it("leaves a sub-rupiah amount fractional rather than rounding it", async () => {
+  it("drops a sub-rupiah amount instead of rounding or passing it through", async () => {
     const { client } = clientReturning([
       { ...FEED_TRANSACTION, gross_amount: 300150, real_gross_amount: 300150 },
     ]);
 
-    const [tx] = await client.list(MERCHANT_ID, QUERY);
+    await expect(client.list(MERCHANT_ID, QUERY)).resolves.toEqual([]);
+  });
 
-    // Rounding here could manufacture a false match against a Rp 3.001 order.
-    expect(tx?.grossAmount).toBe(3001.5);
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["string", "300100"],
+    ["NaN", Number.NaN],
+    ["negative", -300100],
+    ["fractional", 300100.5],
+    ["unsafe", Number.MAX_SAFE_INTEGER],
+  ])("drops a transaction with a %s gross_amount", async (_label, amount) => {
+    const { client } = clientReturning([
+      { ...FEED_TRANSACTION, gross_amount: amount },
+    ]);
+
+    await expect(client.list(MERCHANT_ID, QUERY)).resolves.toEqual([]);
+  });
+
+  it("drops a non-IDR row rather than dividing on the wrong scale", async () => {
+    const { client } = clientReturning([
+      { ...FEED_TRANSACTION, currency: "USD" },
+    ]);
+
+    await expect(client.list(MERCHANT_ID, QUERY)).resolves.toEqual([]);
+  });
+
+  it("drops a transaction without a reusable id", async () => {
+    const { client } = clientReturning([{ ...FEED_TRANSACTION, id: "  " }]);
+
+    await expect(client.list(MERCHANT_ID, QUERY)).resolves.toEqual([]);
   });
 
   it("omits realGrossAmount when the feed does not send it", async () => {
@@ -104,6 +131,18 @@ describe("TransactionClient amount normalization", () => {
 
     expect(tx?.grossAmount).toBe(3001);
     expect(tx?.realGrossAmount).toBeUndefined();
+  });
+
+  it("drops only malformed rows from a mixed page", async () => {
+    const { client } = clientReturning([
+      { ...FEED_TRANSACTION, id: "bad", gross_amount: undefined },
+      FEED_TRANSACTION,
+    ]);
+
+    const transactions = await client.list(MERCHANT_ID, QUERY);
+
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]?.id).toBe(FEED_TRANSACTION.id);
   });
 
   it("returns an empty list when the feed has no transactions", async () => {

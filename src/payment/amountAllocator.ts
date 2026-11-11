@@ -45,7 +45,29 @@ export class AmountAllocator {
    * in range is claimed.
    */
   allocate(baseAmount: number, takenAmounts: Iterable<number>): number {
-    const taken = new Set<number>(takenAmounts);
+    if (!Number.isSafeInteger(baseAmount) || baseAmount <= 0) {
+      throw new MerchantIdError(
+        "CONFIG_INVALID",
+        "baseAmount must be a positive safe integer (whole rupiah)",
+      );
+    }
+    if (!Number.isSafeInteger(baseAmount + this.maxOffset)) {
+      throw new MerchantIdError(
+        "CONFIG_INVALID",
+        "baseAmount + offset exceeds the safe integer range",
+      );
+    }
+
+    const taken = new Set<number>();
+    for (const amount of takenAmounts) {
+      if (!Number.isSafeInteger(amount) || amount <= 0) {
+        throw new MerchantIdError(
+          "CONFIG_INVALID",
+          "taken amounts must be positive safe integers (whole rupiah)",
+        );
+      }
+      taken.add(amount);
+    }
 
     for (let offset = 1; offset <= this.maxOffset; offset++) {
       if (!taken.has(baseAmount + offset)) {

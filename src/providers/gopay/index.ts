@@ -1,5 +1,6 @@
 export { GopayProvider } from "./gopayProvider.js";
 export type { GopayProviderConfig } from "./gopayProvider.js";
+export { normalizeGopayAmount } from "./amount.js";
 
 export { AuthClient as GopayAuthClient } from "../../api/authClient.js";
 export type { AuthClientOptions as GopayAuthClientOptions } from "../../api/authClient.js";
