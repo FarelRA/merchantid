@@ -64,7 +64,10 @@ Store production wajib:
 - **Memfilter `listActive(scope)` secara benar.**
 - **Menegakkan keunikan nominal aktif per scope secara atomik** - misalnya unique constraint pada `scope + uniqueAmount` untuk baris pending.
 - **Mencegah transisi terminal ditimpa proses lain.**
+- **Mengimplementasikan `transition()` opsional** agar cek status, penulisan status, dan klaim ID transaksi terjadi atomik.
 - **Menyimpan klaim transaksi atau jaminan ekuivalen bila proses dapat restart.**
+
+Untuk Node >= 22.13, `merchantid/sqlite` menyediakan `SqlitePaymentStore` yang memenuhi seluruh syarat di atas tanpa dependency runtime.
 
 <Warning>
   `PaymentService` memfilter scope lagi sebagai pertahanan terhadap store lama,

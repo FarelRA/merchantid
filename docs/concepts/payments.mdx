@@ -70,7 +70,7 @@ Untuk runtime tanpa timer persisten (Worker, Edge, Lambda), panggil `tick()` dar
 const { paid, expired } = await provider.payments().tick();
 ```
 
-Satu `tick()` menjalankan satu putaran: menarik feed, menyelesaikan yang cocok, lalu menandai kedaluwarsa yang lewat masa berlaku. Bila sebuah tick sedang berjalan, panggilan tick lain langsung kembali kosong.
+Satu `tick()` menjalankan satu putaran: menarik feed, menyelesaikan yang cocok, lalu menandai kedaluwarsa yang lewat masa berlaku. Bila sebuah tick sedang berjalan, panggilan tick lain langsung kembali kosong. Untuk scheduler eksternal, tambahkan jitter dan backoff (lihat `jitteredBackoff`) agar beberapa replika tidak memukul feed secara serempak.
 
 ## Event
 
@@ -104,9 +104,9 @@ const current = await payments.getPayment(payment.id);
 
 Sebuah transaksi melunasi pembayaran bila:
 
-- **Nominal cocok:** `grossAmount` atau `realGrossAmount` sama dengan `uniqueAmount`.
-- **Status bukan gagal yang dikenal:** status sukses (`settlement`, `capture`, `success`, `paid`, `settled`, `completed`) diterima; status kosong atau tidak dikenal juga diterima (fail-open); hanya status gagal yang dikenal ditolak.
-- **Waktu di dalam jendela:** `createdAt - clockSkewMs` sampai `expiresAt + clockSkewMs`. Timestamp yang tidak dapat diparse jatuh ke nominal dan status saja.
+- **Nominal cocok:** `grossAmount` (sudah dinormalisasi ke rupiah utuh) sama persis dengan `uniqueAmount`. `realGrossAmount` tidak dipakai untuk matching.
+- **Status terverifikasi:** hanya allow-list status sukses (`settlement`, `settle`, `settled`, `capture`, `captured`, `success`, `succeeded`, `paid`, `completed`, `complete`) yang diterima. Status kosong, tidak dikenal, `refund`, `partial_refund`, `void`, dan `failed` ditolak (fail-closed).
+- **Waktu di dalam jendela:** `createdAt - clockSkewMs` sampai `expiresAt + clockSkewMs`. Timestamp yang hilang atau tidak dapat diparse tidak pernah jatuh ke pencocokan nominal saja.
 
 Nominal adalah pembeda utama; keunikan nominal antar pembayaran aktif dijamin allocator, sehingga kecocokan nominal eksak dalam jendela mengidentifikasi pembayar tanpa ambiguitas. Lihat [Konsep inti](/guide/concepts).
 

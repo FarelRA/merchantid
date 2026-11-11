@@ -109,7 +109,7 @@ Set `MERCHANTID_DEBUG` untuk diagnostik umum. Debug tidak boleh mencetak token, 
 ## 3. Aturan yang tidak bisa dinegosiasi
 
 1. **Nol dependency runtime.** `dependencies` di root `package.json` harus kosong/tidak ada. Pakai `fetch` global dan primitive Web API.
-2. **API library bebas Node builtin.** Modul yang memakai `node:fs`, `node:os`, atau `node:path` hanya boleh menjadi implementasi CLI di `src/cli/`. Entry `src/cli.ts` hanya mendelegasikan.
+2. **API library bebas Node builtin.** Entry utama tidak boleh mengimpor `node:*`. Integrasi opsional Node (`src/sqlite/`, `src/webhook/`, `src/security/sessionVault.ts`) hanya diekspos lewat subpath `merchantid/sqlite`, `merchantid/webhook`, dan `merchantid/vault`; jangan me-re-export-nya dari `src/index.ts`. Modul CLI tetap satu-satunya area Node lain di entry utama.
 3. **Dependency mengarah ke dalam.** `src/core/` tidak boleh mengimpor provider, `api/`, `http/`, `payment/`, atau CLI.
 4. **Jangan melonggarkan lint.** Perbaiki kode.
 5. **Jangan pernah menulis token, cookie, OTP, challenge, QRIS asli, atau credential ke log, error, fixture, contoh, maupun diff.**
@@ -169,6 +169,7 @@ Core tidak boleh mengetahui `next_position`, cookie Shopee, GoID grant, atau pay
 - Menyimpan `payment.scope` tanpa menghapus field.
 - Memfilter `listActive(scope)` secara benar.
 - Menegakkan keunikan nominal aktif per scope secara atomik.
+- Mengimplementasikan `transition()` opsional agar cek status, penulisan status, dan klaim ID transaksi terjadi atomik.
 - Mencegah transisi terminal ditimpa proses lain.
 - Menyimpan klaim transaksi atau jaminan ekuivalen bila proses dapat restart.
 
@@ -200,11 +201,11 @@ Ketika pembayaran meninggalkan himpunan aktif, nominalnya dikarantina selama `2 
 
 Kedua penjagaan hidup di memori proses. Restart dan deployment multi-process memerlukan jaminan persistence pada store.
 
-### 5.3 Matcher sengaja fail-open untuk data tidak dikenal
+### 5.3 Matcher fail-closed untuk data tidak dikenal
 
-`matchesPayment` menolak status gagal yang dikenal, tetapi menerima status kosong/tidak dikenal. Timestamp yang tidak dapat diparse juga jatuh ke nominal dan status saja. Ini keputusan sadar untuk feed privat yang dapat berubah.
+`matchesPayment` hanya menerima allow-list status sukses yang terverifikasi. Status kosong, tidak dikenal, `refund`, `partial_refund`, `void`, dan `failed` ditolak. Timestamp yang hilang atau tidak dapat diparse tidak boleh jatuh ke pencocokan nominal + status. Hanya `grossAmount` yang sudah dinormalisasi ke rupiah utuh yang dipakai; `realGrossAmount` bersifat informasi.
 
-Fail-closed dapat membuat pembayaran sah tidak pernah terdeteksi. Melonggarkan status gagal dapat mengirim pesanan tanpa pembayaran sukses. Jangan ubah tanpa test dua arah.
+Melonggarkan aturan ini dapat mengirim pesanan tanpa pembayaran sukses dan tidak bisa dibatalkan dengan aman. Setiap perubahan wajib disertai test dua arah (diterima dan ditolak).
 
 ### 5.4 Jendela pencarian bergulir
 

@@ -54,7 +54,7 @@ const { paid, expired } = await gopay.payments().tick();
 
 ### Satuan minor harus dibagi tepat 100
 
-GoBiz `merchant-analytics/v2` mengirim satuan minor ISO 4217. Rp 3.001 datang sebagai `gross_amount: 300100`. `TransactionClient` membagi tepat dengan 100. Nilai pecahan sengaja tidak dibulatkan agar gagal cocok dengan aman.
+GoBiz `merchant-analytics/v2` mengirim satuan minor ISO 4217. Rp 3.001 datang sebagai `gross_amount: 300100`. `normalizeGopayAmount` membagi tepat dengan 100 satu kali di `TransactionClient`. Baris dengan nominal pecahan, non-angka, negatif, unsafe, atau mata uang selain IDR dibuang, bukan dipaksa menjadi 0 atau dibulatkan.
 
 <Warning>
   Jangan membuat matcher menerima skala mentah dan skala rupiah sekaligus.
@@ -67,9 +67,9 @@ Feed GoBiz menolak `size > 100` dengan HTTP 422. MerchantId meng-clamp page size
 
 Jika outlet lebih sibuk dari kapasitas itu, pendekkan masa berlaku pembayaran. Jangan menaikkan page size melewati limit API.
 
-### Status dan timestamp tidak dikenal sengaja fail-open
+### Status dan timestamp tidak dikenal fail-closed
 
-Matcher menolak status gagal yang dikenal, tetapi menerima status kosong/tidak dikenal dan timestamp yang tidak dapat diparse. Feed privat dapat berubah label. Mengubah perilaku ini menjadi fail-closed dapat membuat pembayaran sah tidak pernah terdeteksi. Lihat [Konsep inti](/guide/concepts).
+Matcher hanya menerima allow-list status sukses yang terverifikasi. Status kosong, tidak dikenal, `refund`, `partial_refund`, `void`, dan `failed` ditolak. Timestamp yang hilang atau tidak dapat diparse juga tidak boleh jatuh ke pencocokan nominal saja. Ini lebih aman untuk uang: pembayaran pending dapat direkonsiliasi manual, sedangkan pembayaran yang terlanjur `paid` tidak dapat dibatalkan dengan aman. Lihat [Konsep inti](/guide/concepts).
 
 ### Settlement sebelum expiry
 

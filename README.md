@@ -24,6 +24,8 @@ Provider bawaan saat ini:
 
 > **Klien tidak resmi.** Provider memakai endpoint privat yang tidak berdokumentasi dan dapat berubah tanpa pemberitahuan. Gunakan hanya dengan akun merchant milik Anda sendiri. Jangan menyimpan token, cookie, OTP, atau payload konfigurasi di log maupun repository.
 
+> **Fork KalaNidhi.** Branch `kalanidhi-hardening` di [FarelRA/merchantid](https://github.com/FarelRA/merchantid) menambahkan matching settlement fail-closed, normalisasi nominal GoPay sekali, rekonsiliasi deterministik, store SQLite durabel, webhook bertanda tangan, dan vault sesi AES-256-GCM. Baca [docs/kalanidhi.md](docs/kalanidhi.md) untuk kontrak integrasi, penyimpanan sesi, kebijakan refund manual, dan catatan deployment. Fork tetap MIT dan bukan afiliasi provider.
+
 ## Instalasi
 
 ```bash
@@ -31,6 +33,14 @@ npm install merchantid
 ```
 
 MerchantId tidak memiliki dependency runtime dan memakai `fetch` global. Node.js 18 atau runtime lain dengan Web Fetch API dapat menjalankan library.
+
+Integrasi opsional Node dipisah sebagai subpath agar entry utama tetap bebas Node builtin:
+
+```ts
+import { SqlitePaymentStore } from "merchantid/sqlite"; // Node >= 22.13
+import { SessionVault } from "merchantid/vault";
+import { deliverWebhook, verifyWebhookSignature } from "merchantid/webhook";
+```
 
 ## Komposisi multi-provider
 
@@ -337,7 +347,7 @@ interface PaymentScope {
 }
 ```
 
-`PaymentStore` bersama wajib menghormati scope pada `listActive(scope)`. `PaymentService` memfilter ulang hasilnya sebagai pertahanan tambahan, tetapi store persisten tetap harus menegakkan keunikan nominal aktif per scope secara atomik.
+`PaymentStore` bersama wajib menghormati scope pada `listActive(scope)`. `PaymentService` memfilter ulang hasilnya sebagai pertahanan tambahan, tetapi store persisten tetap harus menegakkan keunikan nominal aktif per scope secara atomik. Implementasi durabel sebaiknya juga mengimplementasikan `transition()` opsional agar compare-and-set status, klaim ID transaksi, dan penulisan terjadi atomik. `SqlitePaymentStore` di `merchantid/sqlite` sudah memenuhi kontrak ini.
 
 ```ts
 import type { Payment, PaymentScope, PaymentStore } from "merchantid";
@@ -363,7 +373,7 @@ class DatabasePaymentStore implements PaymentStore {
 }
 ```
 
-`InMemoryPaymentStore` hanya cocok untuk test atau satu proses. State, karantina nominal, dan ingatan transaksi yang sudah dipakai tidak dapat mengoordinasikan beberapa proses. Deployment multi-instance harus memindahkan jaminan itu ke penyimpanan tahan lama.
+`InMemoryPaymentStore` hanya cocok untuk test atau satu proses. State, karantina nominal, dan ingatan transaksi yang sudah dipakai tidak dapat mengoordinasikan beberapa proses. Deployment multi-instance harus memindahkan jaminan itu ke penyimpanan tahan lama seperti `SqlitePaymentStore`.
 
 ## CLI dan konfigurasi
 
@@ -444,9 +454,9 @@ try {
 
 ### GoPay: satuan feed harus dibagi tepat 100
 
-GoBiz `merchant-analytics/v2` mengirim satuan minor ISO 4217. Rp 3.001 datang sebagai `gross_amount: 300100`. `TransactionClient` membagi tepat dengan 100. Nilai pecahan sengaja tidak dibulatkan agar gagal cocok dengan aman.
+GoBiz `merchant-analytics/v2` mengirim satuan minor ISO 4217. Rp 3.001 datang sebagai `gross_amount: 300100`. `normalizeGopayAmount` membagi tepat dengan 100 satu kali di `TransactionClient`. Nilai pecahan, non-angka, negatif, unsafe, dan mata uang selain IDR dibuang sebagai baris malformed; nilainya tidak pernah dipaksa menjadi 0.
 
-Jangan membuat matcher menerima skala mentah dan skala rupiah sekaligus. Transaksi Rp 300.100 dapat keliru melunasi pesanan Rp 3.001.
+Jangan membuat matcher menerima skala mentah dan skala rupiah sekaligus. Transaksi Rp 300.100 dapat keliru melunasi pesanan Rp 3.001. Matcher hanya memakai `grossAmount` yang sudah ternormalisasi, bukan `realGrossAmount`.
 
 ### GoPay: page size maksimum 100
 
@@ -454,11 +464,11 @@ Feed GoBiz menolak `size > 100` dengan HTTP 422. MerchantId meng-clamp page size
 
 Jika outlet lebih sibuk dari kapasitas itu, pendekkan masa berlaku pembayaran. Jangan menaikkan page size melewati limit API.
 
-### GoPay: status dan timestamp tidak dikenal sengaja fail-open
+### GoPay: status dan timestamp tidak dikenal fail-closed
 
-Matcher menolak status gagal yang dikenal, tetapi menerima status kosong/tidak dikenal dan timestamp yang tidak dapat diparse. Feed privat dapat berubah label. Mengubah perilaku ini menjadi fail-closed dapat membuat pembayaran sah tidak pernah terdeteksi.
+Matcher hanya menerima allow-list status sukses yang terverifikasi (`settlement`, `capture`, `success`, `paid`, dan variannya). Status kosong, tidak dikenal, `refund`, `partial_refund`, `void`, dan `failed` tidak boleh melunasi pembayaran. Timestamp yang hilang atau tidak dapat diparse juga tidak boleh jatuh ke pencocokan nominal saja.
 
-Perubahan pada kebijakan ini wajib disertai test yang membuktikan arah sukses dan gagal.
+Fail-closed lebih aman untuk uang: pembayaran yang tetap pending dapat direkonsiliasi manual, sedangkan pembayaran yang sudah terlanjur `paid` tidak dapat dibatalkan dengan aman. Setiap perubahan kebijakan wajib disertai test dua arah.
 
 ### Settlement sebelum expiry
 
